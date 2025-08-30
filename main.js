@@ -43,9 +43,29 @@ cubo.setAgua = function(valor) {
 
 escena.add(cubo);
 
-// Crear un plano circular (disco) del doble del radio de la esfera
+// Crear un plano circular (disco) irregular tipo colinas suaves
 const radioPlano = 240; // Duplicado respecto al radio de la esfera (120 * 2)
-const geometriaPlano = new THREE.CircleGeometry(radioPlano, 128);
+const segmentosPlano = 128;
+const geometriaPlano = new THREE.CircleGeometry(radioPlano, segmentosPlano);
+
+// Función de "ruido" simple para colinas suaves
+function ruidoColinas(x, y) {
+  // Suma de senos para dar suavidad, puedes ajustar los parámetros
+  return (
+    Math.sin(x * 0.03) * 6 +
+    Math.cos(y * 0.04) * 4 +
+    Math.sin((x + y) * 0.015) * 8
+  );
+}
+
+// Modificar los vértices del plano para crear elevaciones
+for (let i = 0; i < geometriaPlano.attributes.position.count; i++) {
+  const x = geometriaPlano.attributes.position.getX(i);
+  const y = geometriaPlano.attributes.position.getY(i);
+  const altura = ruidoColinas(x, y);
+  geometriaPlano.attributes.position.setZ(i, altura);
+}
+geometriaPlano.computeVertexNormals();
 
 // Cargar textura para el plano
 const loader = new THREE.TextureLoader();
@@ -198,6 +218,12 @@ function limitarCamaraEnEsfera() {
     offset.setLength(radioMin);
     camara.position.copy(centro.clone().add(offset));
   }
+
+  // --- NUEVO: Limitar la altura de la cámara para que no baje del plano ---
+  const alturaMinima = alturaPlano(camara.position.x, camara.position.z) + 2; // +2 para que no toque el suelo
+  if (camara.position.y < alturaMinima) {
+    camara.position.y = alturaMinima;
+  }
 }
 
 renderizador.domElement.addEventListener('mousedown', function (e) {
@@ -341,7 +367,10 @@ for (let i = 0; i < 10; i++) {
     const geometriaTroncoVar = new THREE.BoxGeometry(5, altura, 5);
     const materialTroncoTextura = new THREE.MeshStandardMaterial({ map: texturaTronco });
     const tronco = new THREE.Mesh(geometriaTroncoVar, materialTroncoTextura);
-    tronco.position.set(pos.x, altura / 2, pos.z);
+
+    // --- AJUSTE: coloca el tronco sobre el plano inclinado ---
+    const alturaSuelo = alturaPlano(pos.x, pos.z);
+    tronco.position.set(pos.x, alturaSuelo + altura / 2, pos.z);
     escena.add(tronco);
 
     // --- COPA: 10 cubos apilados en forma de esfera ---
@@ -354,7 +383,7 @@ for (let i = 0; i < 10; i++) {
       const theta = Math.PI * (1 + Math.sqrt(5)) * j; // ángulo dorado
 
       const x = pos.x + radioEsferaCopa * Math.sin(phi) * Math.cos(theta);
-      const y = altura + radioEsferaCopa * Math.cos(phi);
+      const y = alturaSuelo + altura + radioEsferaCopa * Math.cos(phi);
       const z = pos.z + radioEsferaCopa * Math.sin(phi) * Math.sin(theta);
 
       const geometriaCuboCopa = new THREE.BoxGeometry(tamCopa / 2, tamCopa / 2, tamCopa / 2);
@@ -366,6 +395,161 @@ for (let i = 0; i < 10; i++) {
     troncos.push({ x: pos.x, z: pos.z, radioCopa: tamCopa / 2 });
   }
 }
+
+// Función para obtener la altura del plano en una posición dada
+function alturaPlano(x, z) {
+  return ruidoColinas(x, z);
+}
+
+// --- SELECCIÓN DE OBJETOS CON EL CURSOR ---
+// Raycaster y vector para el mouse
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+let objetoSeleccionado = null;
+let marcadorSeleccion = null;
+
+// Crear un círculo verde para remarcar la selección
+function crearMarcador(objeto) {
+  if (marcadorSeleccion) {
+    escena.remove(marcadorSeleccion);
+    marcadorSeleccion.geometry.dispose();
+    marcadorSeleccion.material.dispose();
+    marcadorSeleccion = null;
+  }
+  // El círculo se dibuja en el plano XZ, alrededor del objeto
+  const radio = objeto.geometry.boundingSphere
+    ? objeto.geometry.boundingSphere.radius * objeto.scale.x * 1.2
+    : 5;
+  const geometry = new THREE.RingGeometry(radio * 0.95, radio, 64);
+  const material = new THREE.MeshBasicMaterial({ color: 0x00ff00, side: THREE.DoubleSide });
+  marcadorSeleccion = new THREE.Mesh(geometry, material);
+  marcadorSeleccion.rotation.x = -Math.PI / 2;
+  marcadorSeleccion.position.set(objeto.position.x, alturaPlano(objeto.position.x, objeto.position.z) + 0.1, objeto.position.z);
+  escena.add(marcadorSeleccion);
+
+  // Mostrar etiqueta solo si es el cubo central
+  if (objeto === cubo) {
+    crearEtiquetaCubo(objeto);
+  } else {
+    eliminarEtiquetaCubo();
+  }
+}
+
+// Evento de click para seleccionar objetos
+renderizador.domElement.addEventListener('click', function (event) {
+  // Calcular posición normalizada del mouse
+  const rect = renderizador.domElement.getBoundingClientRect();
+  mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+  raycaster.setFromCamera(mouse, camara);
+
+  // Objetos seleccionables: todos menos el plano
+  const objetosSeleccionables = [];
+  escena.traverse(obj => {
+    if (
+      obj.isMesh &&
+      obj !== plano &&
+      obj !== marcadorSeleccion &&
+      obj.visible
+    ) {
+      objetosSeleccionables.push(obj);
+    }
+  });
+
+  const intersecciones = raycaster.intersectObjects(objetosSeleccionables, false);
+
+  if (intersecciones.length > 0) {
+    const objeto = intersecciones[0].object;
+    objetoSeleccionado = objeto;
+    crearMarcador(objetoSeleccionado);
+
+    // Acercar la cámara al objeto seleccionado
+    // Calcula una posición a 20 unidades de distancia, mirando al objeto
+    const direccion = new THREE.Vector3().subVectors(objeto.position, camara.position).normalize();
+    const nuevaPos = objeto.position.clone().add(direccion.clone().multiplyScalar(-20));
+    nuevaPos.y = Math.max(nuevaPos.y, alturaPlano(nuevaPos.x, nuevaPos.z) + 5);
+
+    // Movimiento suave de la cámara (opcional)
+    let pasos = 30, paso = 0;
+    const posInicial = camara.position.clone();
+    const targetInicial = camTarget.clone();
+    const posFinal = nuevaPos;
+    const targetFinal = objeto.position.clone();
+
+    function moverCamara() {
+      paso++;
+      const t = paso / pasos;
+      camara.position.lerpVectors(posInicial, posFinal, t);
+      camTarget.lerpVectors(targetInicial, targetFinal, t);
+      camara.lookAt(camTarget);
+      limitarCamaraEnEsfera();
+      if (paso < pasos) {
+        requestAnimationFrame(moverCamara);
+      }
+    }
+    moverCamara();
+  } else {
+    objetoSeleccionado = null;
+    if (marcadorSeleccion) {
+      escena.remove(marcadorSeleccion);
+      marcadorSeleccion.geometry.dispose();
+      marcadorSeleccion.material.dispose();
+      marcadorSeleccion = null;
+    }
+    eliminarEtiquetaCubo();
+  }
+});
+
+// --- TEXTO FLOTANTE PARA ATRIBUTOS DEL CUBO ---
+let etiquetaCubo = null;
+
+function crearEtiquetaCubo(objeto) {
+  // Elimina la etiqueta anterior si existe
+  if (etiquetaCubo) {
+    document.body.removeChild(etiquetaCubo);
+    etiquetaCubo = null;
+  }
+  // Solo mostrar si el objeto es el cubo central
+  if (objeto !== cubo) return;
+
+  etiquetaCubo = document.createElement('div');
+  etiquetaCubo.style.position = 'absolute';
+  etiquetaCubo.style.background = 'rgba(0,0,0,0.7)';
+  etiquetaCubo.style.color = '#fff';
+  etiquetaCubo.style.padding = '8px 14px';
+  etiquetaCubo.style.borderRadius = '8px';
+  etiquetaCubo.style.fontFamily = 'Arial, sans-serif';
+  etiquetaCubo.style.fontSize = '16px';
+  etiquetaCubo.style.pointerEvents = 'none';
+  etiquetaCubo.style.zIndex = 10;
+  etiquetaCubo.innerHTML = `Hambre: ${cubo.comida}<br>Agua: ${cubo.agua}`;
+  document.body.appendChild(etiquetaCubo);
+
+  // Actualiza la posición de la etiqueta en cada frame
+  function actualizarPosicionEtiqueta() {
+    if (!etiquetaCubo || objetoSeleccionado !== cubo) return;
+    // Proyecta la posición 3D del cubo a 2D de pantalla
+    const vector = cubo.position.clone();
+    vector.project(camara);
+    const x = (vector.x * 0.5 + 0.5) * window.innerWidth;
+    const y = (-vector.y * 0.5 + 0.5) * window.innerHeight;
+    etiquetaCubo.style.left = `${x - etiquetaCubo.offsetWidth / 2}px`;
+    etiquetaCubo.style.top = `${y - etiquetaCubo.offsetHeight - 20}px`;
+    requestAnimationFrame(actualizarPosicionEtiqueta);
+  }
+  actualizarPosicionEtiqueta();
+}
+
+function eliminarEtiquetaCubo() {
+  if (etiquetaCubo) {
+    document.body.removeChild(etiquetaCubo);
+    etiquetaCubo = null;
+  }
+}
+
+// ...cuando muevas el cubo...
+cubo.position.y = alturaPlano(cubo.position.x, cubo.position.z) + 1; // +1 para que esté sobre el plano
 
 
 
